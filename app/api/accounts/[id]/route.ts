@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { z } from "zod";
 
 import Account from "@/database/account.model";
 import User from "@/database/user.model";
@@ -52,7 +53,7 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
     const body = await request.json();
     const validatedData = AccountSchema.partial().safeParse(body);
 
-    if (!validatedData.success) throw new ValidationError(validatedData.error.flatten().fieldErrors);
+    if (!validatedData.success) throw new ValidationError(z.flattenError(validatedData.error).fieldErrors);
 
     const updatedAccount = await Account.findByIdAndUpdate(id, validatedData, {
       new: true,

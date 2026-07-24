@@ -1,23 +1,20 @@
 "use client";
 
-import { toast } from "@/hooks/use-toast";
 import { incrementViews } from "@/lib/actions/question.action";
 import { useEffect } from "react";
+import { toast } from "sonner";
 
 const View = ({ questionId }: { questionId: string }) => {
   const handleIncrement = async () => {
     const result = await incrementViews({ questionId });
 
     if (result.success) {
-      toast({
-        title: "Success",
+      toast.success("Success", {
         description: "Views incremented",
       });
     } else {
-      toast({
-        title: "Error",
+      toast.error("Error", {
         description: result.error?.message,
-        variant: "destructive",
       });
     }
   };

@@ -1,7 +1,7 @@
 "use server";
 
 import { Session } from "next-auth";
-import { ZodError, ZodType } from "zod";
+import { z, ZodError, ZodType } from "zod";
 
 import { auth } from "@/auth";
 
@@ -25,7 +25,7 @@ async function action<T>({ params, schema, authorize = false }: ActionOptions<T>
       schema.parse(params);
     } catch (error) {
       if (error instanceof ZodError) {
-        return new ValidationError(error.flatten().fieldErrors as Record<string, string[]>);
+        return new ValidationError(z.flattenError(error).fieldErrors as Record<string, string[]>);
       } else {
         return new Error("Schema validation failed");
       }

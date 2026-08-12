@@ -1,22 +1,26 @@
 "use server";
 
-import mongoose, { QueryFilter } from "mongoose";
+import mongoose, { QueryFilter, Types } from "mongoose";
+import { revalidatePath } from "next/cache";
+import { after } from "next/server";
+import { cache } from "react";
 
+import { auth } from "@/auth";
+import { Answer, Collection, Interaction, Vote } from "@/database";
 import Question, { IQuestionDoc } from "@/database/question.model";
 import TagQuestion from "@/database/tag-question.model";
 import Tag, { ITagDoc } from "@/database/tag.model";
-
-import action from "../handlers/action";
-import handleError from "../handlers/error";
+import action from "@/lib/handlers/action";
+import handleError from "@/lib/handlers/error";
 import {
   AskQuestionSchema,
+  DeleteQuestionSchema,
   EditQuestionSchema,
   GetQuestionSchema,
   IncrementViewsSchema,
   PaginatedSearchParamsSchema,
-} from "../validations";
-import { revalidatePath } from "next/cache";
-import ROUTES from "@/constants/routes";
+} from "@/lib/validations";
+
 import dbConnect from "../mongoose";
 
 export async function createQuestion(params: CreateQuestionParams): Promise<ActionResponse<Question>> {
@@ -112,6 +116,7 @@ export async function editQuestion(params: EditQuestionParams): Promise<ActionRe
     const tagsToAdd = tags.filter(
       (tag) => !question.tags.some((t: ITagDoc) => t.name.toLowerCase().includes(tag.toLowerCase()))
     );
+
     const tagsToRemove = question.tags.filter(
       (tag: ITagDoc) => !tags.some((t) => t.toLowerCase() === tag.name.toLowerCase())
     );
@@ -211,14 +216,14 @@ export async function getQuestions(
   const skip = (Number(page) - 1) * pageSize;
   const limit = Number(pageSize);
 
-  const filterQuery: QueryFilter<typeof Question> = {};
+  const queryFilter: QueryFilter<typeof Question> = {};
 
   if (filter === "recommended") {
     return { success: true, data: { questions: [], isNext: false } };
   }
 
   if (query) {
-    filterQuery.$or = [{ title: { $regex: new RegExp(query, "i") } }, { content: { $regex: new RegExp(query, "i") } }];
+    queryFilter.$or = [{ title: { $regex: new RegExp(query, "i") } }, { content: { $regex: new RegExp(query, "i") } }];
   }
 
   let sortCriteria = {};
@@ -228,7 +233,7 @@ export async function getQuestions(
       sortCriteria = { createdAt: -1 };
       break;
     case "unanswered":
-      filterQuery.answers = 0;
+      queryFilter.answers = 0;
       sortCriteria = { createdAt: -1 };
       break;
     case "popular":
@@ -240,9 +245,9 @@ export async function getQuestions(
   }
 
   try {
-    const totalQuestions = await Question.countDocuments(filterQuery);
+    const totalQuestions = await Question.countDocuments(queryFilter);
 
-    const questions = await Question.find(filterQuery)
+    const questions = await Question.find(queryFilter)
       .populate("tags", "name")
       .populate("author", "name image")
       .lean()
@@ -284,8 +289,6 @@ export async function incrementViews(params: IncrementViewsParams): Promise<Acti
 
     await question.save();
 
-    revalidatePath(ROUTES.QUESTION(questionId));
-
     return {
       success: true,
       data: { views: question.views },
@@ -306,6 +309,72 @@ export async function getHotQuestions(): Promise<ActionResponse<Question[]>> {
       data: JSON.parse(JSON.stringify(questions)),
     };
   } catch (error) {
+    return handleError(error) as ErrorResponse;
+  }
+}
+
+export async function deleteQuestion(params: DeleteQuestionParams): Promise<ActionResponse> {
+  const validationResult = await action({
+    params,
+    schema: DeleteQuestionSchema,
+    authorize: true,
+  });
+
+  if (validationResult instanceof Error) {
+    return handleError(validationResult) as ErrorResponse;
+  }
+
+  const { questionId } = validationResult.params!;
+  const { user } = validationResult.session!;
+  const session = await mongoose.startSession();
+
+  try {
+    session.startTransaction();
+
+    const question = await Question.findById(questionId).session(session);
+    if (!question) throw new Error("Question not found");
+
+    if (question.author.toString() !== user?.id) throw new Error("You are not authorized to delete this question");
+
+    // Delete related entries inside the transaction
+    await Collection.deleteMany({ question: questionId }).session(session);
+    await TagQuestion.deleteMany({ question: questionId }).session(session);
+
+    // For all tags of Question, find them and reduce their count
+    if (question.tags.length > 0) {
+      await Tag.updateMany({ _id: { $in: question.tags } }, { $inc: { questions: -1 } }, { session });
+    }
+
+    //  Remove all votes of the question
+    await Vote.deleteMany({
+      actionId: questionId,
+      actionType: "question",
+    }).session(session);
+
+    // Remove all answers and their votes of the question
+    const answers = await Answer.find({ question: questionId }).session(session);
+
+    if (answers.length > 0) {
+      await Answer.deleteMany({ question: questionId }).session(session);
+
+      await Vote.deleteMany({
+        actionId: { $in: answers.map((answer) => answer.id) },
+        actionType: "answer",
+      }).session(session);
+    }
+
+    await Question.findByIdAndDelete(questionId).session(session);
+
+    await session.commitTransaction();
+    session.endSession();
+
+    revalidatePath(`/profile/${user?.id}`);
+
+    return { success: true };
+  } catch (error) {
+    await session.abortTransaction();
+    session.endSession();
+
     return handleError(error) as ErrorResponse;
   }
 }
